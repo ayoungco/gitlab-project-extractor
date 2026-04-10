@@ -3,20 +3,35 @@ services:
     image: gitlab/gitlab-ce:17.8.1-ce.0
     container_name: gitlab-restore
     hostname: gitlab.local
+    entrypoint:
+      - /bin/bash
+      - /bootstrap/bootstrap-and-restore.sh
     environment:
+      EXTERNAL_URL: http://localhost:8080
+      BACKUP_ARCHIVE: 1739446275_2025_02_13_17.8.1_gitlab_before_cleaning.tar
       GITLAB_OMNIBUS_CONFIG: |
-        external_url 'http://localhost:8080'
+        external_url ENV['EXTERNAL_URL']
         nginx['listen_port'] = 80
-        # Disable unnecessary services for restore purposes
         prometheus_monitoring['enable'] = false
         alertmanager['enable'] = false
         grafana['enable'] = false
         gitlab_exporter['enable'] = false
     ports:
       - "8080:80"
+      - "2224:22"
     volumes:
+      - ./bootstrap:/bootstrap:ro
+      - ./:/restore-src:ro
       - ./gitlab-config:/etc/gitlab
       - ./gitlab-logs:/var/log/gitlab
       - ./gitlab-data:/var/opt/gitlab
-    shm_size: '256m'
-    restart: "no"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl --fail --silent http://127.0.0.1/-/health >/dev/null || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 10m
+    shm_size: 256m
+    restart: unless-stopped

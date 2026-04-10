@@ -1,4 +1,5 @@
 # GitLab data volumes - large, not for version control
+bootstrap/*.log
 gitlab-config/
 gitlab-logs/
 gitlab-data/
