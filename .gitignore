@@ -1,0 +1,7 @@
+# GitLab data volumes - large, not for version control
+gitlab-config/
+gitlab-logs/
+gitlab-data/
+
+# The backup tar itself - too large for git
+*.tar
