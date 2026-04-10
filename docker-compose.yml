@@ -1,6 +1,7 @@
 services:
   gitlab:
     image: gitlab/gitlab-ce:17.8.1-ce.0
+    platform: linux/amd64
     container_name: gitlab-restore
     hostname: gitlab.local
     entrypoint:
@@ -14,7 +15,6 @@ services:
         nginx['listen_port'] = 80
         prometheus_monitoring['enable'] = false
         alertmanager['enable'] = false
-        grafana['enable'] = false
         gitlab_exporter['enable'] = false
     ports:
       - "8080:80"
