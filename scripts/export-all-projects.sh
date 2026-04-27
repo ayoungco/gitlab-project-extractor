@@ -89,7 +89,22 @@ class ApiError < StandardError
     @code = response.code.to_i
     @body = response.body.to_s
     @headers = response.each_header.to_h
-    super("#{method.name.split('::').last.upcase} #{path} failed: HTTP #{code} #{body}")
+    super("#{method.name.split('::').last.upcase} #{path} failed: HTTP #{code} #{summary}")
+  end
+
+  def summary
+    request_id = body[/Request ID:\s*<code>([^<]+)<\/code>/, 1]
+    json_message = begin
+      parsed = JSON.parse(body)
+      parsed['message'] || parsed
+    rescue JSON::ParserError
+      nil
+    end
+
+    return json_message.inspect if json_message
+    return "Request ID #{request_id}" if request_id
+
+    body.gsub(/\s+/, ' ')[0, 240]
   end
 end
 
