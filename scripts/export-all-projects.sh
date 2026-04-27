@@ -6,7 +6,10 @@ OUT_DIR="${1:-project-exports}"
 SERVICE="${GITLAB_SERVICE:-gitlab}"
 CONTAINER="${GITLAB_CONTAINER:-gitlab-restore}"
 POLL_INTERVAL="${GITLAB_EXPORT_POLL_INTERVAL:-5}"
-TIMEOUT_SECONDS="${GITLAB_EXPORT_TIMEOUT_SECONDS:-1800}"
+TIMEOUT_SECONDS="${GITLAB_EXPORT_TIMEOUT_SECONDS:-300}"
+PROJECT_DELAY_SECONDS="${GITLAB_EXPORT_PROJECT_DELAY_SECONDS:-10}"
+RETRY_LIMIT="${GITLAB_EXPORT_RETRY_LIMIT:-12}"
+RETRY_SLEEP_SECONDS="${GITLAB_EXPORT_RETRY_SLEEP_SECONDS:-60}"
 CONTAINER_OUT="/tmp/gitlab-project-exports-$(date +%Y%m%d%H%M%S)"
 TOKEN=""
 
@@ -20,6 +23,9 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "${OUT_DIR}"
+
+docker compose exec -T "${SERVICE}" sh -c \
+  "mkdir -p /var/log/gitlab/gitlab-rails && touch /var/log/gitlab/gitlab-rails/production.log /var/log/gitlab/gitlab-rails/application_json.log && chown -R git:git /var/log/gitlab/gitlab-rails"
 
 echo "Creating temporary GitLab API token"
 TOKEN="$(
@@ -41,12 +47,21 @@ TOKEN="$(
 )"
 
 echo "Starting exports inside ${CONTAINER}:${CONTAINER_OUT}"
+docker compose exec -T "${SERVICE}" mkdir -p "${CONTAINER_OUT}"
+if find "${OUT_DIR}" -maxdepth 1 -type f | grep -q .; then
+  echo "Copying existing local exports into container workspace for resume"
+  docker cp "${OUT_DIR}/." "${CONTAINER}:${CONTAINER_OUT}/"
+fi
+
 set +e
 docker compose exec -T \
   -e GITLAB_EXPORT_TOKEN="${TOKEN}" \
   -e GITLAB_EXPORT_DIR="${CONTAINER_OUT}" \
   -e GITLAB_EXPORT_POLL_INTERVAL="${POLL_INTERVAL}" \
   -e GITLAB_EXPORT_TIMEOUT_SECONDS="${TIMEOUT_SECONDS}" \
+  -e GITLAB_EXPORT_PROJECT_DELAY_SECONDS="${PROJECT_DELAY_SECONDS}" \
+  -e GITLAB_EXPORT_RETRY_LIMIT="${RETRY_LIMIT}" \
+  -e GITLAB_EXPORT_RETRY_SLEEP_SECONDS="${RETRY_SLEEP_SECONDS}" \
   "${SERVICE}" ruby <<'RUBY'
 require 'fileutils'
 require 'json'
@@ -60,9 +75,23 @@ TOKEN = ENV.fetch('GITLAB_EXPORT_TOKEN')
 OUT_DIR = ENV.fetch('GITLAB_EXPORT_DIR')
 POLL_INTERVAL = Integer(ENV.fetch('GITLAB_EXPORT_POLL_INTERVAL', '5'))
 TIMEOUT_SECONDS = Integer(ENV.fetch('GITLAB_EXPORT_TIMEOUT_SECONDS', '1800'))
+PROJECT_DELAY_SECONDS = Integer(ENV.fetch('GITLAB_EXPORT_PROJECT_DELAY_SECONDS', '2'))
+RETRY_LIMIT = Integer(ENV.fetch('GITLAB_EXPORT_RETRY_LIMIT', '12'))
+RETRY_SLEEP_SECONDS = Integer(ENV.fetch('GITLAB_EXPORT_RETRY_SLEEP_SECONDS', '30'))
 BASE = 'http://127.0.0.1/api/v4'
 
 FileUtils.mkdir_p(OUT_DIR)
+
+class ApiError < StandardError
+  attr_reader :code, :body, :headers
+
+  def initialize(method, path, response)
+    @code = response.code.to_i
+    @body = response.body.to_s
+    @headers = response.each_header.to_h
+    super("#{method.name.split('::').last.upcase} #{path} failed: HTTP #{code} #{body}")
+  end
+end
 
 def api_uri(path)
   URI("#{BASE}#{path}")
@@ -78,10 +107,33 @@ def request(method, path)
   end
 end
 
+def retry_after_seconds(error, attempt)
+  header = error.headers['retry-after'].to_s
+  return Integer(header) if header.match?(/\A\d+\z/)
+
+  RETRY_SLEEP_SECONDS * attempt
+end
+
+def with_retries(label)
+  attempt = 0
+
+  begin
+    attempt += 1
+    yield
+  rescue ApiError => e
+    raise unless e.code == 429 && attempt <= RETRY_LIMIT
+
+    sleep_for = retry_after_seconds(e, attempt)
+    warn "  #{label} hit rate limit; retrying in #{sleep_for}s (attempt #{attempt}/#{RETRY_LIMIT})"
+    sleep sleep_for
+    retry
+  end
+end
+
 def json_request(method, path, allowed:)
   res = request(method, path)
   unless allowed.include?(res.code.to_i)
-    raise "#{method.name.split('::').last.upcase} #{path} failed: HTTP #{res.code} #{res.body}"
+    raise ApiError.new(method, path, res)
   end
 
   body = res.body.to_s
@@ -98,7 +150,13 @@ def download(path, target)
       unless res.code.to_i == 200
         body = +''
         res.read_body { |chunk| body << chunk }
-        raise "GET #{path} failed: HTTP #{res.code} #{body}"
+        response = Struct.new(:code, :body) do
+          def each_header
+            return enum_for(:each_header) unless block_given?
+          end
+        end.new(res.code, body)
+        res.each_header { |key, value| response.define_singleton_method(:each_header) { { key => value }.each } }
+        raise ApiError.new(Net::HTTP::Get, path, response)
       end
 
       tmp = "#{target}.tmp"
@@ -136,11 +194,20 @@ projects.each_with_index do |project, index|
   puts "[#{index + 1}/#{projects.length}] Exporting #{path}"
 
   begin
-    json_request(Net::HTTP::Post, "/projects/#{id}/export", allowed: [200, 201, 202, 409])
+    if File.exist?(target) && File.size(target).positive?
+      puts "  already exists, skipping"
+      next
+    end
+
+    with_retries('export request') do
+      json_request(Net::HTTP::Post, "/projects/#{id}/export", allowed: [200, 201, 202, 409])
+    end
 
     started = Time.now
     loop do
-      status = json_request(Net::HTTP::Get, "/projects/#{id}/export", allowed: [200])
+      status = with_retries('export status') do
+        json_request(Net::HTTP::Get, "/projects/#{id}/export", allowed: [200])
+      end
       export_status = status['export_status']
 
       case export_status
@@ -157,11 +224,15 @@ projects.each_with_index do |project, index|
       sleep POLL_INTERVAL
     end
 
-    download("/projects/#{id}/export/download", target)
+    with_retries('export download') do
+      download("/projects/#{id}/export/download", target)
+    end
     puts "  wrote #{target}"
   rescue => e
     failures << "#{path}: #{e.message}"
     warn "  FAILED: #{e.message}"
+  ensure
+    sleep PROJECT_DELAY_SECONDS if PROJECT_DELAY_SECONDS.positive? && index < projects.length - 1
   end
 end
 

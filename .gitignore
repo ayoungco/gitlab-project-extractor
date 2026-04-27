@@ -4,6 +4,7 @@ gitlab-config/
 gitlab-logs/
 gitlab-data/
 project-exports/
+project-repository-bundles/
 
 # The backup tar itself - too large for git
 *.tar

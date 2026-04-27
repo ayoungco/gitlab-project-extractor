@@ -67,6 +67,18 @@ To choose a different output directory:
 scripts/export-all-projects.sh /path/to/output-directory
 ```
 
+If GitLab's project export jobs hang or fail on restored data, export the Git repositories directly as portable bundles instead:
+
+```bash
+scripts/export-all-repositories.sh
+```
+
+Repository bundles are written to `project-repository-bundles/` by default. Restore one with:
+
+```bash
+git clone project-repository-bundles/group__project.bundle project
+```
+
 For a manual UI export after logging in:
 
 1. Open the project you want to extract.
