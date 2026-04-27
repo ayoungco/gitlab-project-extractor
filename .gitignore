@@ -3,6 +3,7 @@ bootstrap/*.log
 gitlab-config/
 gitlab-logs/
 gitlab-data/
+project-exports/
 
 # The backup tar itself - too large for git
 *.tar

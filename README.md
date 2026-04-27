@@ -53,7 +53,21 @@ SSH access is exposed on `localhost:2224` if you need it. The web UI is on `loca
 
 ## Export projects
 
-After logging in:
+You can export all projects without logging in to the web UI:
+
+```bash
+scripts/export-all-projects.sh
+```
+
+The script creates a short-lived local admin API token inside the restored container, starts a GitLab project export for every project, waits for completion, downloads the archives, and revokes the token. Archives are written to `project-exports/` by default.
+
+To choose a different output directory:
+
+```bash
+scripts/export-all-projects.sh /path/to/output-directory
+```
+
+For a manual UI export after logging in:
 
 1. Open the project you want to extract.
 2. Go to `Settings` -> `General` -> `Advanced`.

@@ -4,9 +4,10 @@ set -euo pipefail
 
 BACKUP_ARCHIVE="${BACKUP_ARCHIVE:?BACKUP_ARCHIVE must be set}"
 BACKUP_PATH="/restore-src/${BACKUP_ARCHIVE}"
-BACKUP_BASENAME="${BACKUP_ARCHIVE%.tar}"
 RESTORE_MARKER="/var/opt/gitlab/.restore-complete"
 WRAPPER_PID=""
+RESTORE_ARCHIVE=""
+RESTORE_BASENAME=""
 
 cleanup() {
   if [[ -n "${WRAPPER_PID}" ]] && kill -0 "${WRAPPER_PID}" >/dev/null 2>&1; then
@@ -39,10 +40,29 @@ copy_backup_into_place() {
     exit 1
   fi
 
-  if [[ ! -f "/var/opt/gitlab/backups/${BACKUP_ARCHIVE}" ]]; then
-    echo "Copying ${BACKUP_ARCHIVE} into /var/opt/gitlab/backups"
-    cp "${BACKUP_PATH}" "/var/opt/gitlab/backups/${BACKUP_ARCHIVE}"
+  local backup_id
+  backup_id="$(tar -xOf "${BACKUP_PATH}" backup_information.yml | awk -F': ' '/^:backup_id:/ { gsub(/\047/, "", $2); print $2; exit }')"
+  if [[ -z "${backup_id}" ]]; then
+    echo "Could not read backup_id from ${BACKUP_PATH}"
+    exit 1
   fi
+
+  RESTORE_ARCHIVE="${backup_id}_gitlab_backup.tar"
+  RESTORE_BASENAME="${backup_id}"
+  local restore_path="/var/opt/gitlab/backups/${RESTORE_ARCHIVE}"
+  local legacy_path="/var/opt/gitlab/backups/${BACKUP_ARCHIVE}"
+
+  if [[ ! -f "${restore_path}" ]]; then
+    echo "Copying ${BACKUP_ARCHIVE} into /var/opt/gitlab/backups as ${RESTORE_ARCHIVE}"
+    if [[ -f "${legacy_path}" ]]; then
+      ln "${legacy_path}" "${restore_path}" 2>/dev/null || cp "${legacy_path}" "${restore_path}"
+    else
+      cp "${BACKUP_PATH}" "${restore_path}"
+    fi
+  fi
+
+  chown git:git "${restore_path}"
+  chmod 0600 "${restore_path}"
 }
 
 restore_backup_once() {
@@ -60,8 +80,8 @@ restore_backup_once() {
   gitlab-ctl stop puma
   gitlab-ctl stop sidekiq
 
-  echo "Restoring backup ${BACKUP_BASENAME}"
-  gitlab-backup restore BACKUP="${BACKUP_BASENAME}" force=yes
+  echo "Restoring backup ${RESTORE_BASENAME}"
+  gitlab-backup restore BACKUP="${RESTORE_BASENAME}" force=yes
 
   echo "Reconfiguring and restarting GitLab after restore"
   gitlab-ctl reconfigure
